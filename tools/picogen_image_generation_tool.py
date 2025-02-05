@@ -37,21 +37,21 @@ class PicogenJobGetResponse(BaseModel):
     id: str
     status: str
     payload: dict
-    result: str
+    result: Optional[str]
     duration_ms: int
     created_at: int
 
 
 class PicogenService:
-    def __init__(self, emitter: EventEmitter):
+    def __init__(self, emitter: EventEmitter, valves: BaseValves = BaseValves()):
         self.emitter = emitter
-        self.valves = BaseValves()
+        self.valves = valves
         self.session = Session()
         self.session.headers.update({"API-Token": self.valves.api_key})
 
     async def job_generate(self, prompt: str, ratio: str = "1:1", seed: Optional[int] = None):
         try:
-            await self.emitter.emit(description="Generating job", status="in_progress")
+            await self.emitter.emit(description="Generating job")
             payload = {
                 "prompt": prompt,
                 "ratio": ratio,
@@ -61,33 +61,40 @@ class PicogenService:
             response: Response = self.session.post(f"{self.valves.api_url}/job/generate", json=payload)
             response.raise_for_status()
             responses: list[PicogenJobGenerateResponse] = [PicogenJobGenerateResponse(**r) for r in response.json() if r]
-            await self.emitter.emit(description="Job generated", status="done")
-            return responses
+            generate_response = responses[0]
+            await self.emitter.emit(description="Job generated", done=True)
+            return generate_response
         except HTTPError as e:
-            print(f"Error generating job: {e.response.json()}")
-            await self.emitter.emit(description="Error generating job", status="error")
+            await self.emitter.emit(description=f"Error generating job: {e.response.json()}", done=True)
+
             raise e
         except Exception as e:
-            print(f"Error generating job: {e}")
-            await self.emitter.emit(description="Error generating job", status="error")
+            await self.emitter.emit(description=f"Error generating job: {e}", done=True)
             raise e
 
     async def job_get(self, job_id: str):
         for _ in range(10):
             try:
-                await self.emitter.emit(description="Getting job", status="in_progress")
+                await self.emitter.emit(description=f"Getting job {job_id}")
                 response: Response = self.session.get(f"{self.valves.api_url}/job/get/{job_id}")
                 response.raise_for_status()
                 responses: list[PicogenJobGetResponse] = [PicogenJobGetResponse(**r) for r in response.json() if r]
-                await self.emitter.emit(description="Job retrieved", status="done")
-                return responses
+                get_response = responses[0]
+
+                if not get_response.result:
+                    await self.emitter.emit(description=f"Retrying get job {job_id}")
+                    sleep(2)
+                    continue
+
+                await self.emitter.emit(description=f"Job {job_id} retrieved", done=True)
+                return get_response
+
             except HTTPError as e:
-                print(f"Error getting job {job_id}: {e.response.json()}")
-                sleep(1)
+                await self.emitter.emit(description=f"Error getting job: {e.response.json()}", done=True)
+                sleep(2)
             except Exception as e:
-                print(f"Error getting job {job_id}: {e}")
-                await self.emitter.emit(description="Error getting job", status="error")
-                break
+                await self.emitter.emit(description=f"Error getting job: {e}", done=True)
+                raise Exception(f"Failed to get job {job_id}: {e}")
 
         raise Exception(f"Failed to get job {job_id} after 10 attempts")
 
@@ -105,7 +112,6 @@ class Tools:
 
         Args:
             prompt (str): The prompt to generate an image from.
-            __event_emitter__ (Callable[[dict], Any], optional): An event emitter to emit events to.
 
         Returns:
             str: The generated image url.
@@ -115,13 +121,10 @@ class Tools:
         service = PicogenService(emitter, self.valves)
 
         try:
-            responses = await service.job_generate(prompt)
-            generate_response = responses[0]
+            response = await service.job_generate(prompt)
+            response = await service.job_get(response.id)
 
-            responses = await service.job_get(generate_response.id)
-            get_response = responses[0]
-
-            return get_response.result
+            return response.result
         except HTTPError as e:
             return f"Error generating image: {e.response.json()}"
         except Exception as e:
