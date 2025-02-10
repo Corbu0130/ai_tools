@@ -86,6 +86,7 @@ class PicogenService:
                     sleep(2)
                     continue
 
+                await self.check_file(get_response.result)
                 await self.emitter.emit(description=f"Job {job_id} retrieved", done=True)
                 return get_response
 
@@ -97,6 +98,10 @@ class PicogenService:
                 raise Exception(f"Failed to get job {job_id}: {e}")
 
         raise Exception(f"Failed to get job {job_id} after 10 attempts")
+
+    async def check_file(self, file_url: str) -> None:
+        response: Response = self.session.get(file_url)
+        response.raise_for_status()
 
 
 class Tools:
